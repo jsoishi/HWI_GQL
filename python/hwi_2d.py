@@ -9,6 +9,8 @@ from pathlib import Path
 import numpy as np
 import dedalus.public as d3
 import logging
+
+from GQLProjection import GQLProjection as Project
 logger = logging.getLogger(__name__)
 
 # Parses .cfg filename passed to script
@@ -23,6 +25,8 @@ datadir = Path("runs") / config_file.stem
 
 params = runconfig['params']
 # Parameters
+GQL = params.getboolean('GQL')
+Lambda_x = params.getint('Lambda_x')
 Lx = params.getfloat('Lx')
 Lz = params.getfloat('Lz')
 Nx = params.getint('Nx')
@@ -49,7 +53,7 @@ dtype = np.float64
 coords = d3.CartesianCoordinates('x', 'z')
 dist = d3.Distributor(coords, dtype=dtype)
 xbasis = d3.RealFourier(coords['x'], size=Nx, bounds=(0, Lx), dealias=dealias)
-zbasis = d3.Chebyshev(coords['z'], size=Nz, bounds=(-Lz/2, Lz/2), dealias=dealias)
+zbasis = d3.ChebyshevT(coords['z'], size=Nz, bounds=(-Lz/2, Lz/2), dealias=dealias)
 x = dist.local_grid(xbasis)
 z = dist.local_grid(zbasis)
 
@@ -74,13 +78,25 @@ integ = lambda A: d3.Integrate(d3.Integrate(A, 'x'), 'z')
 lift_basis = zbasis.derivative_basis(1) # First derivative basis
 lift = lambda A: d3.Lift(A, lift_basis, -1) # First-order reduction
 grad_u = d3.grad(u) + ez*lift(tau_u1)
-grad_rho = d3.grad(rho) + ez*lift(tau_rho1) 
+grad_rho = d3.grad(rho) + ez*lift(tau_rho1)
+
+Project_high = lambda A: Project(A,[Lambda_x,],'h')
+Project_low = lambda A: Project(A,[Lambda_x,],'l')
+ul = Project_low(u)
+uh = Project_high(u)
+rhol = Project_low(rho)
+rhoh = Project_high(rho)
+
 
 # Problem
 problem = d3.IVP([u, rho, p, tau_rho1, tau_rho2, tau_u1, tau_u2, tau_p], namespace=locals())
 problem.add_equation("trace(grad_u) + tau_p= 0")
-problem.add_equation("dt(u) + grad(p) - div(grad_u)/Re + Rib*rho*ez + lift(tau_u2) = -u@grad(u)")
-problem.add_equation("dt(rho) - div(grad_rho)/(Re*Pr) + lift(tau_rho2) = -u@grad(rho)")
+if GQL:
+    problem.add_equation("dt(u) + grad(p) - div(grad_u)/Re + Rib*rho*ez + lift(tau_u2) = -Project_low(ul@grad(ul) + uh@grad(uh)) - Project_high(ul@grad(uh) + uh@grad(ul))")
+    problem.add_equation("dt(rho) - div(grad_rho)/(Re*Pr) + lift(tau_rho2) = -Project_low(ul@grad(rhol)+ uh@grad(rhoh)) - Project_high(ul@grad(rhoh) + uh@grad(rhol))")
+else:
+    problem.add_equation("dt(u) + grad(p) - div(grad_u)/Re + Rib*rho*ez + lift(tau_u2) = -u@grad(u)")
+    problem.add_equation("dt(rho) - div(grad_rho)/(Re*Pr) + lift(tau_rho2) = -u@grad(rho)")
 problem.add_equation("integ(p) = 0") # Pressure gauge
 
 # boundary conditions
