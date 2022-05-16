@@ -87,6 +87,8 @@ uh = Project_high(u)
 rhol = Project_low(rho)
 rhoh = Project_high(rho)
 
+KE = 0.5 * d3.DotProduct(u,u)
+KE.name = 'KE'
 
 # Problem
 problem = d3.IVP([u, rho, p, tau_rho1, tau_rho2, tau_u1, tau_u2, tau_p], namespace=locals())
@@ -110,33 +112,46 @@ problem.add_equation("dot(ex, dot(ez,grad_u(z=Lz/2))) = 0")
 
 # Solver
 solver = problem.build_solver(timestepper)
-solver.stop_sim_time = stop_sim_time
 
 # Initial conditions
 # Background shear
 u['g'][0] = np.tanh(z)
 rho['g'] = (1-np.tanh(Aspect*z)) 
 
-# Add small velocity perturbations localized to the shear layers
-# use vector potential to ensure div(u) = 0
-A = dist.Field(name='A', bases=(xbasis,zbasis))
-A.fill_random('g', seed=42, distribution='normal')
-A.low_pass_filter(scales=(0.2, 0.2, 0.2))
-A['g'] *= (1 - (2*z/Lz)**2) *np.exp(-z**2) # Damp noise at walls
+if restart:
+    solver.load_state(restart)
+else:
+    # Add small velocity perturbations localized to the shear layers
+    # use vector potential to ensure div(u) = 0
+    A = dist.Field(name='A', bases=(xbasis,zbasis))
+    A.fill_random('g', seed=42, distribution='normal')
+    A.low_pass_filter(scales=(0.2, 0.2, 0.2))
+    A['g'] *= (1 - (2*z/Lz)**2) *np.exp(-z**2) # Damp noise at walls
 
-up = d3.skew(d3.grad(A)).evaluate()
-up.change_scales(1)
-u['g'] += 1e-3*up['g'] 
+    up = d3.skew(d3.grad(A)).evaluate()
+    up.change_scales(1)
+    u['g'] += 1e-3*up['g'] 
+
+solver.stop_sim_time = solver.sim_time + stop_sim_time
+if stop_iteration:
+    logger.info("Setting stop_iteration to {}".format(stop_iteration))
+    solver.stop_iteration = solver.iteration + stop_iteration
 
 # Analysis
 if dist.comm.rank == 0:
     if not datadir.exists():
         datadir.mkdir(parents=True)
-    
-
+# checkpoints
+check = solver.evaluator.add_file_handler(datadir / Path('checkpoints'), iter=100, max_writes=1, virtual_file=True)
+check.add_tasks(solver.state)
+# use this later for slices in 3D
 snapshots = solver.evaluator.add_file_handler(datadir/'snapshots', sim_dt=1., max_writes=10)
 snapshots.add_task(rho)
 snapshots.add_task(u)
+# timeseries 
+timeseries = solver.evaluator.add_file_handler(datadir / Path('timeseries'), sim_dt=0.1)
+timeseries.add_task(integ(KE), name='KE')
+timeseries.add_task(integ(d3.div(u)*d3.div(u))**0.5, name='rms_div_u')
 
 # CFL
 CFL = d3.CFL(solver, initial_dt=1e-3, cadence=10, safety=0.2, threshold=0.05, max_change=1.5, min_change=0.5, max_dt=max_timestep)
@@ -163,4 +178,4 @@ except:
     raise
 finally:
     solver.log_stats()
-
+    solver.evaluate_handlers_now(timestep)
