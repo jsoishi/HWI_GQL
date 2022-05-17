@@ -61,6 +61,7 @@ z = dist.local_grid(zbasis)
 p = dist.Field(name='p', bases=(xbasis,zbasis))
 rho = dist.Field(name='rho', bases=(xbasis,zbasis))
 u = dist.VectorField(coords, name='u', bases=(xbasis,zbasis))
+U = dist.VectorField(coords, name='U', bases=(xbasis,zbasis)) # background velocity
 tau_rho1 = dist.Field(name='tau_rho1', bases=xbasis)
 tau_rho2 = dist.Field(name='tau_rho2', bases=xbasis)
 tau_u1 = dist.VectorField(coords, name='tau_u1', bases=xbasis)
@@ -87,9 +88,6 @@ uh = Project_high(u)
 rhol = Project_low(rho)
 rhoh = Project_high(rho)
 
-KE = 0.5 * d3.DotProduct(u,u)
-KE.name = 'KE'
-
 # Problem
 problem = d3.IVP([u, rho, p, tau_rho1, tau_rho2, tau_u1, tau_u2, tau_p], namespace=locals())
 problem.add_equation("trace(grad_u) + tau_p= 0")
@@ -115,7 +113,8 @@ solver = problem.build_solver(timestepper)
 
 # Initial conditions
 # Background shear
-u['g'][0] = np.tanh(z)
+U['g'][0] = np.tanh(z)
+u['g'] = U['g']
 rho['g'] = (1-np.tanh(Aspect*z)) 
 
 if restart:
@@ -126,17 +125,24 @@ else:
     A = dist.Field(name='A', bases=(xbasis,zbasis))
     A.fill_random('g', seed=42, distribution='normal')
     A.low_pass_filter(scales=(0.2, 0.2, 0.2))
-    A['g'] *= (1 - (2*z/Lz)**2) *np.exp(-z**2) # Damp noise at walls
-
+    A['g'] *= (1 - (2*z/Lz)**2) *np.exp(-(z)**2) # Damp noise at walls
+    # uncomment next line and comment out following three
+    # to perturb rho instead of velocity field
+    #rho['g'] += 1e-3*A['g']
     up = d3.skew(d3.grad(A)).evaluate()
     up.change_scales(1)
-    u['g'] += 1e-3*up['g'] 
+    u['g'] += 1e-3*up['g']
+# setup energies
+KE = 0.5 * d3.DotProduct(u,u)
+KE.name = 'KE'
+u_p = u - U
+KE_p = 0.5* d3.DotProduct(u_p,u_p)
+KE_p.name = 'KE_p'
 
 solver.stop_sim_time = solver.sim_time + stop_sim_time
 if stop_iteration:
     logger.info("Setting stop_iteration to {}".format(stop_iteration))
     solver.stop_iteration = solver.iteration + stop_iteration
-
 # Analysis
 if dist.comm.rank == 0:
     if not datadir.exists():
@@ -151,13 +157,11 @@ snapshots.add_task(u)
 # timeseries 
 timeseries = solver.evaluator.add_file_handler(datadir / Path('timeseries'), sim_dt=0.1)
 timeseries.add_task(integ(KE), name='KE')
+timeseries.add_task(integ(KE_p), name='KE_pert')
 timeseries.add_task(integ(d3.div(u)*d3.div(u))**0.5, name='rms_div_u')
-
 # CFL
 CFL = d3.CFL(solver, initial_dt=1e-3, cadence=10, safety=0.2, threshold=0.05, max_change=1.5, min_change=0.5, max_dt=max_timestep)
 CFL.add_velocity(u)
-if Aspect != 0:
-    CFL.add_frequency((Rib*((d3.grad(rho)*ez)**2)**0.5)**0.5)
 # Flow properties
 flow = d3.GlobalFlowProperty(solver, cadence=10)
 flow.add_property(d3.dot(u,ez)**2, name='w2')
